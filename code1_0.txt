@@ -1,0 +1,345 @@
+def fill_in_std_uncertainties(f):
+    
+    nrows = len(f)-1
+    for i  in range(nrows):
+        dist = f[i,1].lower()[0:3]
+        if dist == 'uni':
+            f[i,3]= eval(f[i,2])[0]/3**0.5  # uniform dist, u(x)= HW/sqrt(3)
+        elif dist == 'tri':
+            f[i,3] = eval(f[i,2])[0]/6*0.5  # triangle dist, u(x)=HW/sqrt(6)
+        elif dist == 'arc':
+            f[i,3] = eval(f[i,2])[0]/2*0.5  # arcsine dist, u(x)=HW/sqrt(2)
+        elif dist == 'tra':
+            f[i,3]= ((eval(f[i,2])[0]**2 + \
+                      eval(f[i,2])[1]**2)/3)**0.5   # trap. dist, u(x) = sqrt((a**2+b**2)/3)
+        else:
+            f[i,3]= eval(f[i,2])[0]/(f[i,5]+1)**0.5  # standard deviation of mean for other distributions
+    return f
+
+def assign_uv(f):
+
+    nrows = len(f)-1
+    x = []
+    for i  in range(nrows):
+        x.append(ufloat(f[i,0], f[i,3]))  # assign the nominal values and std. uncetsinties
+    return x
+
+def assgin_uv_mcerp(f):
+    nrows = len(f)-1
+    err_message = ''
+    x=[]
+    for i in range(nrows):
+        dist = f[i,1].lower()[0:3]
+        if dist =='nor' :                 # Normal(mu, sigma)
+            x.append(mc.N(f[i,0], f[i,3]))
+            
+        elif dist == 'uni':               # Uniform(low, high)       
+            x.append(mc.U(f[i,0]-eval(f[i,2])[0], f[i,0]+eval(f[i,2])[0]))
+            
+        elif dist == 'stu':               # t- distribution (dof, loc, scale)
+            x.append(mc.uv(rv =ss.t(df=f[i,5],loc=f[i,0],scale=f[i,3])))
+            
+        elif dist == 'tri':          # Triangular(low, peak, high)
+            x.append(mc.Tri(f[i,0]- eval(f[i,2])[0], f[i,0],f[i,0]+ eval(f[i,2])[0])) 
+            
+        elif dist =='tra':
+            c = 0.5 * abs((eval(f[i,2])[1]-eval(f[i,2])[0]))/eval(f[i,2])[1] # 0.5*(HW2-HW1)/HW2
+            d = 0.5 * (eval(f[i,2])[1]+eval(f[i,2])[0])/eval(f[i,2])[1] # 0.5*(HW2+HW1)/HW2
+            loc = f[i,0] - eval(f[i,2])[1]                             # loc = mean -HW2
+            scale = 2. * eval(f[i,2])[1]                               # scale = 2 * HW2
+            x.append(mc.uv(rv=ss.trapezoid(c,d, loc, scale)))    
+            
+        elif dist == 'arc':          # arcsine dist, u(x)=HW/sqrt(2)
+            x.append(mc.uv(rv=ss.arcsine(loc = f[1,0], sclae = 2 * eval(f[1,2])[0])))
+            
+        elif dist =='log':           # LogNormal(mu, sigma)    
+            x.append(mc.LogN(f[i,0], f[i,3]))
+            
+        elif dist =='gam':           # Gamma(k, theta) where k=(mu/sigma)^2, theta=sigma^2/mu   
+            k, theta = (f[i,0]/f[i,3])**2, f[i,3]**2/f[i,0]
+            if k == 0:
+                err_messge = 'k = 1E-6 is assigend to avoid k = 0 in Gamma distribution'
+                k = 1E-6
+            x.append(mc.Gamma(k, theta))
+            
+    return x, err_message
+
+def form_corr_matrix(f):
+    nrows = len(f)-1
+    corr_matrix = np.zeros((nrows, nrows))
+    for i in range(corr_matrix.shape[0]):
+        corr_matrix[i,i] = 1
+    
+    corel =[]; ccs =[]
+    for i in range(nrows):
+        if f[i,6] != '':
+            corel.append (eval(f[i,6])[0])
+    group = []        
+    for co in list(set(corel)):
+        subgroup = []
+        for i in range (nrows):
+            if f[i,6] != '' and eval(f[i,6])[0] == co:
+                subgroup.append(i)
+                cc = eval(f[i,6])[1]
+        group.append(subgroup)
+        ccs.append (cc)
+    
+    for k in range(len(group)):
+        for i in group[k]:
+            for j in group[k]:
+                if j>i:
+                    corr_matrix [i, j] = ccs[k]
+                    corr_matrix [j, i] = ccs[k]
+    return corr_matrix
+
+def for_trapezoid (p, a1, a2):                   
+    be = abs(a1 - a2)/(a1 + a2)
+    if be <= p/(1-p):
+        k = (1-(p * (1 - be**2))**0.5)/((1 + be**2)/6)**0.5
+    elif be > p/(1-p):
+        k = 0.5 *p *(1 + be)/((1 + be**2)/6)**0.5
+    return k
+
+def after_dof(dof, p):                         
+    k = ss.t.interval([p, 1-p], dof)[1][1]  
+    return k
+
+def coverage_factor(tb):
+    message =''
+    p, q = 0.05, 0.3                     
+    
+    tb[:,7] = abs(tb[:,4] * tb[:,3])     # abs(ui) = abs(ci * u(xi)))
+    tb = tb[tb[:,7].argsort()][::-1]     
+    uc = sum(tb[:,7]**2)**0.5            # combined std. uncertainty
+    
+    denom = sum(tb[:,7]**4/tb[:,5])
+    if denom == 0:
+        edof = np.inf
+    else:
+        edof = uc**4/denom               # eff. deg of freedom (eff. DoF)
+ 
+    first_pass = (uc**2 - tb[0,7]**2)**0.5/tb[0,7] < q    #u1=tb[0,7]
+    second_pass = abs((uc**2 - tb[0,7]**2 -tb[1,7]**2))**0.5/ \
+    (tb[0,7]**2 + tb[1,7]**2)**0.5 < q 
+    
+    top_dist = tb[0,1].lower()[0:3]
+    sec_dist = tb[1,1].lower()[0:3]
+    if top_dist == 'nor':           
+        k = 2.                    
+        message = 'The top contribution follows a normal distrubution'
+        return k, uc, edof, message
+    
+    if top_dist == 'stu':         
+        k = after_dof (edof, p)
+        message = 'The top contribution follows a t-distrubution'
+        return k, uc, edof, message
+        
+    if top_dist == 'uni':        
+        if first_pass:
+            k = 1.65
+            message = 'The top contribution follows a rectangular distrubution with the first passed'
+        else:  
+            if sec_dist == 'uni':   
+                if second_pass:
+                    a1 = abs(tb[0,4]) * eval(tb[0,2])[0]   # a1 = c1 * HW1
+                    a2 = abs(tb[1,4]) * eval(tb[1,2])[0]   # a2 = c2 * HW2
+                    k = for_trapezoid (p, a1, a2)
+                    message = 'The top and second contributions follow rectangular \
+                    distrubutions with the first and second passed'
+                else:
+                    k = after_dof (edof, p)
+                    message = 'The top and second contributions follow rectangular \
+                    distrubutions with the first passed and without the 2nd passed'
+
+            else:
+                k = after_dof (edof, p)
+                message = 'The top and second contributions follow rectangular \
+                distrubutions with the first pass'
+        return k, uc, edof, message
+       
+    if top_dist == 'tri':     
+        if first_pass:
+            k =1.9
+            meaasge = 'The top contribution follows a triangle distribution with the first passed'
+        else: 
+            k = after_dof (edof, p)
+            message = 'The top contribution follows a triangle distribution without the first passed'
+        return k, uc, edof, message
+    
+    if top_dist == 'tra':      
+        if first_pass:
+            a1 = eval(tb[0,2])[0]       # Needs confirmation=> ok
+            a2 = eval(tb[0,2])[1]       # Needs confirmation=> ok  
+            k = for_trapezoid (p, a1, a2)
+            meaasge = 'The top contribution follows a trapezoidal distribution with the first passed'
+        else:
+            k = after_dof (edof, p)
+            meaasge = 'The top contribution follows a trapezoidal distribution without the first passed'
+        return k, uc, edof, message
+
+    if top_dist == 'arc':     
+        if first_pass:
+            k = 1.41
+            meaasge = 'The top contribution follows U-distribution with the first passed'
+        else:     
+            k = after_dof (edof, p)
+            message = 'The top contribution follows U-distribution without the first passed'
+        return k, uc, edof, message
+
+    k = after_dof (edof, p)
+    message = 'This coverage factor corresponds to the other cases.'
+    return k, uc, edof, message # coverage factor, combined std uncert, message for debugging in the future
+
+def coverage_interval (vals):
+    kde = sm.nonparametric.KDEUnivariate(vals)
+    kde.fit(gridsize= 100)
+    for i in range(len(kde.support)):
+        if ((kde.cdf[i]<=0.025) and (kde.cdf[i+1]>=0.025)):
+            Low_lim= (0.025-kde.density[i])*(kde.support[i+1]
+                                        -kde.support[i])/(kde.cdf[i+1]-kde.cdf[i]) +kde.support[i]
+        elif ((kde.cdf[i]<=0.975) and (kde.cdf[i+1]>=0.975)):
+            High_lim= (0.975-kde.cdf[i])*(kde.support[i+1]
+                                         -kde.support[i])/(kde.cdf[i+1]-kde.cdf[i]) +kde.support[i]
+    return Low_lim, High_lim, kde
+
+def get_pairs(f):
+    nrows =len(f)-1
+    corel =[]; ccs =[]
+    for i in range(nrows):
+        if f[i,6] != '':
+            corel.append (eval(f[i,6])[0])
+    group = []        
+    for co in list(set(corel)):
+        subgroup = []
+        for i in range (nrows):
+            if f[i,6] != '' and eval(f[i,6])[0] == co:
+                subgroup.append(i)
+                cc = eval(f[i,6])[1]
+        group.append(subgroup)
+        ccs.append (cc)
+    pairs =[]
+    for k in range(len(group)):
+        for j in range(len(group[k])):
+            if 0 <j: 
+                pairs.append([group[k][0],group[k][j], ccs[k]])
+    return pairs
+
+
+def pre_calculations(f):
+    nrows = len(f)-1
+    model_eq = f[-1,1]
+    model_eq = model_eq.replace('@', '')
+    
+    f = fill_in_std_uncertainties(f)       
+    
+    x = assign_uv(f)
+
+    for i  in range(nrows):
+        f[i,4] = eval(model_eq).derivatives[x[i]]  # calculate the sensitivity coefficients
+
+    return x, f
+                
+    
+def first_order(x, f, switch ='u'):
+    nrows = len(f)-1
+    model_eq = f[-1,1]
+    model_eq = model_eq.replace('@', '')
+    
+    corr_matrix = form_corr_matrix(f)
+    k, uc, edof, msg = coverage_factor(f[0:-1,:])
+
+    if switch.lower() == 'c':     # correlated case
+        x = correlated_values_norm([[x[i].nominal_value, x[i].std_dev] for i in range(nrows)],\
+                                    corr_matrix)                         
+    else:   # uncorrelated case
+        x = correlated_values_norm([[x[i].nominal_value, x[i].std_dev] for i in range(nrows)],\
+                                    np.identity(nrows))
+    result = eval(model_eq)
+
+    return result, k, uc, edof, msg
+
+
+def mcerp_result(f, npts = 10000,):
+
+    msg = 'no error'
+    mc.npts = npts
+    x, msg = assgin_uv_mcerp(f)
+
+    c = np.array([[1.0, 1.0], [1.0, 1.0 ]])
+    if key.lower()=='c':
+        pairs = get_pairs(f)
+        for j in range(len(pairs)):
+            c[0,1] = pairs[j][2]
+            c[1,0] = pairs[j][2]
+            mc.correlate([x[pairs[j][0]],x[pairs[j][1]]], c)
+
+    model_eq = f[-1,1]
+    model_eq = model_eq.replace('@', 'math.')
+    return eval(model_eq), x, msg
+
+### Select an excel file for calculation
+files = glob('n_*.xlsx')
+for i, file in enumerate(files):
+    print ('({})  {}'.format (i, file))
+print()
+
+file_no = input ('Select an excel file number to calculate:')
+key = input ('Select correlated or uncorrelated result (c or u):')
+key2 = input ('Save sensivity factors in an excel (y or n)?:')
+
+### Reading the first datasheet
+df= DataFrame(read_excel(files[int(file_no)], sheet_name = 0, usecols = "A:H"))
+f = df.fillna('')
+f = np.array(f)
+
+x, f = pre_calculations(f)
+sf = f[0:-1,4]
+
+if key2.lower()=='y':
+    ## save sc in another excel sheet
+    df = DataFrame(f, columns=['x', 'pdf', 'parmas', 'u(x)', 'c(x[i])', 'DoF', 'correl', 'X'])
+    with ExcelWriter(files[int(file_no)].replace('.' , '_sc.')) as writer:
+        df.to_excel(writer, sheet_name="with_SC", index = False)
+    
+
+fom, k, edof, uc, fom_msg = first_order(x, f, switch =key)
+
+print ()
+print ('FOM result = {:6.5e} +/-{:3.2e} (k = {:3.2f}, 95% confidence level)'.\
+       format(fom.nominal_value, fom.std_dev*k, k))
+print ('95% coverage interval:  {:6.4E} to {:6.4E}'.\
+       format(fom.nominal_value - k*fom.std_dev,\
+              fom.nominal_value + k*fom.std_dev))
+
+npts = 20000
+mcm, X, mcm_msg = mcerp_result(f, npts)
+
+#result.describe()
+low_limit, high_limit, kde = coverage_interval(mcm._mcpts)
+mcm_k = 0.5 * (high_limit-low_limit)/mcm.std
+
+print ()
+print ('MCM result = {:6.5e}, std = {:3.2e}, skew = {:4.3f}, kurt = {:4.3f}'.\
+        format(mcm.mean, mcm.std, mcm.skew, mcm.kurt))
+print ('95% coverage interval:  {:6.4E} to {:6.4E}'.format(low_limit,high_limit))
+print ('calculated k from 95% converage interval = {:3.2f}'.format(mcm_k))
+
+_, ax = plt.subplots(1,2, figsize=(10, 4), constrained_layout=True)
+
+(freq, bins, patches) = ax[0].hist(mcm._mcpts, \
+                    density=True, bins=40, label='histogram', edgecolor='k', alpha=0.3)
+ax[0].plot(kde.support, kde.density, lw=3, label='KDE')
+ax[1].plot(kde.support, kde.cdf, lw =1, label ='CDF')
+ax[0].axvline(x = low_limit , ymax = 0.3, c='r')
+ax[0].axvline(x = high_limit, ymax = 0.3, c='r')
+#ax[1].text (low_limit,0.6, '95 % coverage range')
+ax[1].axvline(x = low_limit , ymax = 0.55, c='r')
+ax[1].axvline(x = high_limit, ymin = 0.45, c='r')
+ax[1].plot([low_limit, high_limit], [0.5, 0.5], c='k', ls='--', label='95% coverage')
+ax[0].legend(loc = 'upper right')
+ax[1].legend(loc = 'upper left')
+ax[0].set_xlabel ('Dependant variable')
+ax[1].set_xlabel ('Dependant variable')
+ax[0].set_ylabel ('Frequency')
+ax[1].set_ylabel ('Cumulative probability');
+plt.savefig('kde.png', dpi=100)
